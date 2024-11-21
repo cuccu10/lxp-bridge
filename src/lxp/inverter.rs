@@ -197,6 +197,7 @@ impl Inverter {
     }
 
     // inverter -> coordinator
+    /*
     async fn receiver(&self, mut socket: tokio::net::tcp::OwnedReadHalf) -> Result<()> {
         use std::time::Duration;
         use tokio::time::timeout;
@@ -213,6 +214,7 @@ impl Inverter {
                 match timeout(Duration::from_millis(read_timeout * 1000), future).await {
                     Ok(r) => r,
                     Err(_) => bail!("no data for {} seconds", read_timeout),
+                    
                 }
             } else {
                 future.await
@@ -238,6 +240,58 @@ impl Inverter {
 
         Err(anyhow!("lost connection"))
     }
+    */
+    async fn receiver(&self, mut socket: tokio::net::tcp::OwnedReadHalf) -> Result<()> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+    use {bytes::BytesMut, tokio_util::codec::Decoder};
+
+    let mut buf = BytesMut::new();
+    let mut decoder = lxp::packet_decoder::PacketDecoder::new();
+
+    loop {
+        // Đọc dữ liệu từ socket
+        let future = socket.read_buf(&mut buf);
+        let read_timeout = self.config().read_timeout();
+        let len = if read_timeout > 0 {
+            match timeout(Duration::from_millis(read_timeout * 1000), future).await {
+                Ok(r) => r,
+                Err(_) => bail!("no data for {} seconds", read_timeout),
+            }
+        } else {
+            future.await
+        }?;
+
+        // Nếu không nhận được thêm dữ liệu, xử lý bộ đệm còn lại
+        if len == 0 {
+            while let Some(packet) = decoder.decode_eof(&mut buf)? {
+                println!("Decoded Packet on EOF: {:?}", packet); // In gói tin khi kết nối đóng
+                self.handle_incoming_packet(packet)?;
+            }
+            break;
+        }
+
+        // In dữ liệu thô đã đọc được
+        if !buf.is_empty() {
+            println!("Raw data read ({} bytes): {:?}", len, &buf[..len]);
+        }
+
+        // Giải mã và xử lý từng gói tin
+        while let Some(packet) = decoder.decode(&mut buf)? {
+            println!("Decoded Packet: {:?}", packet); // In gói tin đã giải mã
+            self.handle_incoming_packet(packet.clone())?;
+
+            // Kiểm tra tính hợp lệ của datalog và serial
+            self.compare_datalog(packet.datalog()); // all packets have datalog serial
+            if let Packet::TranslatedData(td) = packet {
+                self.compare_inverter(td.inverter); // only TranslatedData has inverter serial
+            };
+        }
+    }
+
+    Err(anyhow!("lost connection"))
+}
+
 
     fn handle_incoming_packet(&self, packet: Packet) -> Result<()> {
         // bytes received are logged in packet_decoder, no need here
